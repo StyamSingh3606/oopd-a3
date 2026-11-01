@@ -1,0 +1,10 @@
+build/
+cmake-build-*/
+*.o
+*.out
+pandemic
+results/*.csv
+results/*.ppm
+__pycache__/
+*.pyc
+.vscode/
