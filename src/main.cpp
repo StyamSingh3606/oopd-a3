@@ -1,4 +1,3 @@
-
 #include <iostream>
 #include <vector>
 #include <random>
@@ -9,6 +8,8 @@
 #include <string>
 #include <stdexcept>
 #include <iomanip>
+#include <thread>
+#include <functional>
 
 using namespace std;
 
@@ -44,6 +45,9 @@ struct Config {
     int snapshotEvery = 0;
     int maxPending = 2;
     int ioLatency = 0;
+
+    string mode = "sequential";
+    string partition = "row";
 
     string output = "results/sequential.csv";
 };
@@ -202,20 +206,21 @@ uint64_t calculateChecksum(const Grid& grid) {
 }
 
 // Calculate the next day using two separate grids
-void simulateDay(const Grid& current,
-                 Grid& next,
-                 const Config& cfg,
-                 int day,
-                 double betaEff) {
+void simulateRows(const Grid& current,
+                  Grid& next,
+                  const Config& cfg,
+                  int day,
+                  double betaEff,
+                  int startRow,
+                  int endRow) {
 
-    for (int r = 0; r < current.N; r++) {
+    for (int r = startRow; r < endRow; r++) {
 
         for (int c = 0; c < current.N; c++) {
 
             size_t id =
                 static_cast<size_t>(r) * current.N + c;
 
-            // Read only from current grid
             Person p = current.cells[id];
 
             if (p.state == S) {
@@ -243,22 +248,77 @@ void simulateDay(const Grid& current,
                     double random =
                         randomValue(cfg.seed, day, id, 1);
 
-                    if (random < cfg.deathProbability) {
+                    if (random < cfg.deathProbability)
                         p.state = D;
-                    }
-                    else {
+                    else
                         p.state = R;
-                    }
 
                     p.infectedDays = 0;
                 }
             }
 
-            // Write only to next grid
             next.cells[id] = p;
         }
     }
 }
+
+// Sequential or thread-per-day execution
+void simulateDay(const Grid& current, Grid& next, const Config& cfg, int day, double betaEff) {
+
+    if (cfg.mode == "sequential") {
+
+        simulateRows(current, next, cfg, day, betaEff, 0, current.N);
+
+        return;
+    }
+
+    if (cfg.mode == "thread-per-day") {
+
+        int T = min(cfg.threads, current.N);
+
+        vector<thread> workers;
+        workers.reserve(T);
+
+        int rowsPerThread = current.N / T;
+        int extraRows = current.N % T;
+
+        int startRow = 0;
+
+        for (int i = 0; i < T; i++) {
+
+            int rows = rowsPerThread +
+                       (i < extraRows ? 1 : 0);
+
+            int endRow = startRow + rows;
+
+            workers.emplace_back(
+                simulateRows,
+                cref(current),
+                ref(next),
+                cref(cfg),
+                day,
+                betaEff,
+                startRow,
+                endRow
+            );
+
+            startRow = endRow;
+        }
+
+        // Wait for every worker before swapping grids
+        for (thread& worker : workers) {
+            worker.join();
+        }
+
+        return;
+    }
+
+    throw runtime_error("Unknown execution mode: " + cfg.mode);
+}
+
+
+
+
 
 // Write daily statistics to CSV
 void writeResults(const Grid& grid,
@@ -322,67 +382,73 @@ void parseArguments(int argc, char* argv[], Config& cfg) {
 
         if (i + 1 >= argc) {
             throw runtime_error("Missing value for " + arg);
-        }
+}
 
-        string value = argv[++i];
+string value = argv[++i];
 
-        if (arg == "--N")
-            cfg.N = stoi(value);
+if (arg == "--N")
+    cfg.N = stoi(value);
 
-        else if (arg == "--days")
-            cfg.days = stoi(value);
+else if (arg == "--days")
+    cfg.days = stoi(value);
 
-        else if (arg == "--seed")
-            cfg.seed = stoull(value);
+else if (arg == "--seed")
+    cfg.seed = stoull(value);
 
-        else if (arg == "--I0")
-            cfg.initialInfected = stoi(value);
+else if (arg == "--I0")
+    cfg.initialInfected = stoi(value);
 
-        else if (arg == "--duration")
-            cfg.infectionDuration = stoi(value);
+else if (arg == "--duration")
+    cfg.infectionDuration = stoi(value);
 
-        else if (arg == "--beta")
-            cfg.infectionRate = stod(value);
+else if (arg == "--beta")
+    cfg.infectionRate = stod(value);
 
-        else if (arg == "--mu")
-            cfg.deathProbability = stod(value);
+else if (arg == "--mu")
+    cfg.deathProbability = stod(value);
 
-        else if (arg == "--v")
-            cfg.vaccination = stod(value);
+else if (arg == "--v")
+    cfg.vaccination = stod(value);
 
-        else if (arg == "--mask")
-            cfg.mask = stod(value);
+else if (arg == "--mask")
+    cfg.mask = stod(value);
 
-        else if (arg == "--lambda")
-            cfg.lockdownFactor = stod(value);
+else if (arg == "--lambda")
+    cfg.lockdownFactor = stod(value);
 
-        else if (arg == "--theta-on")
-            cfg.thetaOn = stod(value);
+else if (arg == "--theta-on")
+    cfg.thetaOn = stod(value);
 
-        else if (arg == "--theta-off")
-            cfg.thetaOff = stod(value);
+else if (arg == "--theta-off")
+    cfg.thetaOff = stod(value);
 
-        else if (arg == "--threads")
-            cfg.threads = stoi(value);
+else if (arg == "--threads")
+    cfg.threads = stoi(value);
 
-        else if (arg == "--chunks")
-            cfg.chunks = stoi(value);
+else if (arg == "--chunks")
+    cfg.chunks = stoi(value);
 
-        else if (arg == "--snapshot-every")
-            cfg.snapshotEvery = stoi(value);
+else if (arg == "--mode")
+    cfg.mode = value;
 
-        else if (arg == "--max-pending")
-            cfg.maxPending = stoi(value);
+else if (arg == "--partition")
+    cfg.partition = value;
 
-        else if (arg == "--io-latency")
-            cfg.ioLatency = stoi(value);
+else if (arg == "--snapshot-every")
+    cfg.snapshotEvery = stoi(value);
 
-        else if (arg == "--output")
-            cfg.output = value;
+else if (arg == "--max-pending")
+    cfg.maxPending = stoi(value);
 
-        else
-            throw runtime_error("Unknown argument: " + arg);
-    }
+else if (arg == "--io-latency")
+    cfg.ioLatency = stoi(value);
+
+else if (arg == "--output")
+    cfg.output = value;
+
+else
+    throw runtime_error("Unknown argument: " + arg);
+}
 }
 
 // Validate parameters
@@ -427,6 +493,14 @@ void validateConfig(const Config& cfg) {
         throw runtime_error(
             "Vaccination and initial infections exceed population"
         );
+    }
+    if (cfg.mode != "sequential" &&
+    cfg.mode != "thread-per-day") {
+    throw runtime_error("Invalid execution mode");
+    }
+
+    if (cfg.partition != "row") {
+    throw runtime_error("Only row partition is implemented currently");
     }
 }
 
