@@ -15,6 +15,9 @@
 #include <condition_variable>
 #include <future>
 #include <memory>
+#include <chrono>
+#include <deque>
+#include <filesystem>
 
 using namespace std;
 
@@ -179,6 +182,8 @@ struct Config {
     int snapshotEvery = 0;
     int maxPending = 2;
     int ioLatency = 0;
+    string snapshotMode = "blocking";
+    string snapshotDir = "results/snapshots";
 
     string mode = "sequential";
 
@@ -842,6 +847,90 @@ void simulateDay(
     }
 }
 
+// ============================================================
+// PART C1: PPM SNAPSHOT WRITER
+// ============================================================
+
+void writePPM(
+    const Grid& snapshot,
+    int day,
+    const string& directory,
+    int latencyMs
+) {
+    // Simulate slow storage
+    if (latencyMs > 0) {
+        this_thread::sleep_for(
+            chrono::milliseconds(latencyMs)
+        );
+    }
+
+    string filename =
+        directory + "/snapshot_day_" +
+        to_string(day) + ".ppm";
+
+    ofstream image(filename);
+
+    if (!image.is_open()) {
+        throw runtime_error(
+            "Cannot open snapshot file: " + filename
+        );
+    }
+
+    // PPM P3 format: width, height, maximum colour value
+    image << "P3\n";
+    image << snapshot.N << " " << snapshot.N << "\n";
+    image << "255\n";
+
+    for (int r = 0; r < snapshot.N; r++) {
+        for (int c = 0; c < snapshot.N; c++) {
+
+            const Person& person = snapshot.at(r, c);
+
+            int red = 255;
+            int green = 255;
+            int blue = 255;
+
+            switch (person.state) {
+                case S: // Susceptible: white
+                    red = 255; green = 255; blue = 255;
+                    break;
+
+                case I: // Infected: red
+                    red = 255; green = 0; blue = 0;
+                    break;
+
+                case R: // Recovered: green
+                    red = 0; green = 255; blue = 0;
+                    break;
+
+                case V: // Vaccinated: blue
+                    red = 0; green = 0; blue = 255;
+                    break;
+
+                case D: // Dead: black
+                    red = 0; green = 0; blue = 0;
+                    break;
+            }
+
+            image << red << " "
+                  << green << " "
+                  << blue << " ";
+        }
+
+        image << "\n";
+    }
+
+    image.close();
+
+    if (!image) {
+        throw runtime_error(
+            "Failed while writing snapshot: " + filename
+        );
+    }
+
+    cout << "Snapshot saved: " << filename << "\n";
+}
+
 
 // ============================================================
 // WRITE RESULTS TO CSV
@@ -915,6 +1004,7 @@ void parseArguments(
                 << "--snapshot-every <interval>\n"
                 << "--max-pending <maximum-pending-writes>\n"
                 << "--io-latency <milliseconds>\n"
+                << "--snapshot-mode <blocking|async>\n"
                 << "--output <csv-file>\n";
 
             exit(0);
@@ -985,6 +1075,9 @@ void parseArguments(
 
         else if (arg == "--io-latency")
             cfg.ioLatency = stoi(value);
+
+        else if (arg == "--snapshot-mode")
+            cfg.snapshotMode = value;
 
         else if (arg == "--output")
             cfg.output = value;
@@ -1066,6 +1159,12 @@ void validateConfig(const Config& cfg) {
         throw runtime_error(
             "Invalid threads or snapshot settings"
         );
+    }
+
+    if (cfg.snapshotMode != "blocking" &&
+    cfg.snapshotMode != "async") {
+
+    throw runtime_error("Snapshot mode must be blocking or async");
     }
 
     if (cfg.vaccination * population +
@@ -1150,8 +1249,13 @@ int main(int argc, char* argv[]) {
             );
         }
 
+        // Part C1: pending asynchronous snapshot writes
+        deque<future<void>> pendingSnapshots;
+
+        int snapshotFailures = 0;
 
         bool lockdown = false;
+
 
 
         // Record initial state (Day 0)
@@ -1219,6 +1323,71 @@ int main(int argc, char* argv[]) {
                 file
             );
 
+            // Part C1: Periodic snapshots
+if (cfg.snapshotEvery > 0 &&
+    day % cfg.snapshotEvery == 0) {
+
+    if (cfg.snapshotMode == "blocking") {
+
+        try {
+            writePPM(
+                current,
+                day,
+                cfg.snapshotDir,
+                cfg.ioLatency
+            );
+        }
+        catch (const exception& e) {
+            snapshotFailures++;
+            cerr << "Snapshot failed: "
+                 << e.what() << "\n";
+        }
+    }
+    else if (cfg.snapshotMode == "async") {
+
+        // Enforce maximum pending writes
+        if (pendingSnapshots.size() >=
+            static_cast<size_t>(cfg.maxPending)) {
+
+            try {
+                pendingSnapshots.front().get();
+            }
+            catch (const exception& e) {
+                snapshotFailures++;
+                cerr << "Snapshot failed: "
+                     << e.what() << "\n";
+            }
+
+            pendingSnapshots.pop_front();
+        }
+
+        // Copy current grid before submitting background task
+        Grid snapshot = current;
+
+        int snapshotDay = day;
+        string directory = cfg.snapshotDir;
+        int latency = cfg.ioLatency;
+
+        pendingSnapshots.push_back(
+            async(
+                launch::async,
+                [snapshot = move(snapshot),
+                 snapshotDay,
+                 directory,
+                 latency]() {
+
+                    writePPM(
+                        snapshot,
+                        snapshotDay,
+                        directory,
+                        latency
+                    );
+                }
+            )
+        );
+    }
+}
+
 
             infectedFraction =
                 static_cast<double>(counts.infected) /
@@ -1250,13 +1419,32 @@ int main(int argc, char* argv[]) {
         }
 
 
-        file.close();
+        while (!pendingSnapshots.empty()) {
 
+    try {
+        pendingSnapshots.front().get();
+    }
+    catch (const exception& e) {
+        snapshotFailures++;
 
-        cout << "\nSimulation completed!\n";
+        cerr << "Snapshot failed: "
+             << e.what() << "\n";
+    }
 
-        cout << "Results saved in "
-             << cfg.output << "\n";
+    pendingSnapshots.pop_front();
+}
+
+file.close();
+
+cout << "\nSimulation completed!\n";
+
+if (cfg.snapshotEvery > 0) {
+    cout << "Snapshot failures: "
+         << snapshotFailures << "\n";
+}
+
+cout << "Results saved in "
+     << cfg.output << "\n";
 
     }
 
