@@ -8,3 +8,4 @@ results/*.ppm
 __pycache__/
 *.pyc
 .vscode/
+results/snapshots/
