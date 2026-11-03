@@ -18,6 +18,7 @@
 #include <chrono>
 #include <deque>
 #include <filesystem>
+#include "simulation.h"
 
 using namespace std;
 
@@ -129,81 +130,6 @@ public:
 
 
 // ============================================================
-// STATES AND DATA STRUCTURES
-// ============================================================
-
-enum State {
-    S,
-    I,
-    R,
-    V,
-    D
-};
-
-
-struct Person {
-
-    State state = S;
-
-    int infectedDays = 0;
-};
-
-
-// ============================================================
-// CONFIGURATION
-// ============================================================
-
-struct Config {
-
-    int N = 100;
-    int days = 50;
-
-    int initialInfected = 10;
-    int infectionDuration = 7;
-
-    double infectionRate = 0.08;
-    double deathProbability = 0.01;
-
-    double vaccination = 0.0;
-    double mask = 1.0;
-
-    double lockdownFactor = 0.3;
-
-    double thetaOn = 0.02;
-    double thetaOff = 0.005;
-
-    uint64_t seed = 42;
-
-    // Part B and Part C parameters
-
-    int threads = 1;
-    int chunks = 1;
-
-    int snapshotEvery = 0;
-    int maxPending = 2;
-    int ioLatency = 0;
-    string snapshotMode = "blocking";
-    string snapshotDir = "results/snapshots";
-
-    string mode = "sequential";
-
-    string partition = "row";
-
-    string output = "results/sequential.csv";
-};
-
-
-struct Counts {
-
-    uint64_t susceptible = 0;
-    uint64_t infected = 0;
-    uint64_t recovered = 0;
-    uint64_t vaccinated = 0;
-    uint64_t dead = 0;
-};
-
-
-// ============================================================
 // DETERMINISTIC RANDOM NUMBER GENERATION
 // ============================================================
 
@@ -241,34 +167,6 @@ double randomValue(
     return static_cast<double>(h >> 11) *
            (1.0 / 9007199254740992.0);
 }
-
-
-// ============================================================
-// GRID
-// ============================================================
-
-struct Grid {
-
-    int N;
-
-    vector<Person> cells;
-
-    explicit Grid(int size)
-        : N(size),
-          cells(static_cast<size_t>(size) * size) {}
-
-
-    Person& at(int r, int c) {
-
-        return cells[static_cast<size_t>(r) * N + c];
-    }
-
-
-    const Person& at(int r, int c) const {
-
-        return cells[static_cast<size_t>(r) * N + c];
-    }
-};
 
 
 // ============================================================
@@ -1200,6 +1098,9 @@ void validateConfig(const Config& cfg) {
 // ============================================================
 
 int main(int argc, char* argv[]) {
+    if (argc > 1 && string(argv[1]) == "--sweep") {
+    return runParameterSweep(argc, argv);
+    }
 
     try {
 
