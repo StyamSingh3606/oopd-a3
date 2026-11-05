@@ -45,7 +45,10 @@ struct SweepOptions {
     vector<double> betas;
     vector<double> vaccinations;
     vector<uint64_t> seeds;
+
     int workers = 4;
+    int threadsPerRun = 1;
+
     int timeLimitSeconds = 60;
     string output = "results/sweep.csv";
 };
@@ -113,6 +116,10 @@ static SweepOptions parseSweepArguments(
             options.workers =
                 stoi(getValue(i, argc, argv));
         }
+        else if (arg == "--threads-per-run") {
+            options.threadsPerRun =
+                stoi(getValue(i, argc, argv));
+        }
         else if (arg == "--time-limit") {
             options.timeLimitSeconds =
                 stoi(getValue(i, argc, argv));
@@ -167,11 +174,12 @@ static SweepOptions parseSweepArguments(
     }
 
     if (options.workers <= 0 ||
+        options.threadsPerRun <= 0 ||
         options.timeLimitSeconds <= 0) {
         throw runtime_error(
-            "Workers and time limit must be positive"
-        );
-    }
+            "Workers, threads per run and time limit must be positive"
+    );
+}
 
     if (options.base.N <= 0 ||
         options.base.days < 0 ||
@@ -222,7 +230,8 @@ static SweepOptions parseSweepArguments(
 }
 
 static RunSummary runOneSimulation(
-    const Config& cfg
+    const Config& cfg,
+    ThreadPool* pool
 ) {
     Grid current(cfg.N);
     Grid next(cfg.N);
@@ -260,7 +269,7 @@ static RunSummary runOneSimulation(
             cfg,
             day,
             betaEff,
-            nullptr
+            pool
         );
 
         swap(current, next);
@@ -387,14 +396,27 @@ int runParameterSweep(int argc, char* argv[]) {
                     cfg.vaccination = completion.run.vaccination;
                     cfg.seed = completion.run.seed;
 
-                    // Outer workers provide the parallelism.
-                    // Avoid nested thread pools.
-                    cfg.mode = "sequential";
                     cfg.snapshotEvery = 0;
 
-                    completion.summary =
-                        runOneSimulation(cfg);
-                }
+                    cfg.threads = options.threadsPerRun;
+                    cfg.chunks = options.threadsPerRun * 4;
+
+                    cfg.mode = options.threadsPerRun == 1
+                    ? "sequential"
+                    : "thread-pool";
+
+                    cfg.partition = "block";
+
+                    if (options.threadsPerRun == 1) {
+                        completion.summary =
+                                runOneSimulation(cfg, nullptr);}
+                    else {
+                        ThreadPool pool(options.threadsPerRun);
+
+                        completion.summary =
+                        runOneSimulation(cfg, &pool);
+                        }
+                    }
                 catch (const exception& e) {
                     completion.error = e.what();
                 }

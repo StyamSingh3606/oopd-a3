@@ -1,10 +1,19 @@
-
 #ifndef SIMULATION_H
 #define SIMULATION_H
 
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <thread>
+#include <queue>
+#include <functional>
+#include <mutex>
+#include <condition_variable>
+#include <future>
+#include <memory>
+#include <vector>
+#include <stdexcept>
+#include <utility>
 
 // ------------------------------------------------------------
 // STATES
@@ -61,6 +70,97 @@ struct Config {
     std::string partition = "row";
 
     std::string output = "results/sequential.csv";
+    bool benchmarkMode = false;
+    std::string benchmarkOutput = "results/benchmarks/d1.csv";
+};
+
+class ThreadPool {
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+
+    std::mutex queueMutex;
+    std::condition_variable condition;
+
+    bool stopping = false;
+
+public:
+    explicit ThreadPool(int threadCount) {
+        if (threadCount <= 0) {
+            throw std::runtime_error("Thread pool size must be positive");
+        }
+
+        workers.reserve(static_cast<size_t>(threadCount));
+
+        for (int i = 0; i < threadCount; i++) {
+            workers.emplace_back([this]() {
+                while (true) {
+                    std::function<void()> task;
+
+                    {
+                        std::unique_lock<std::mutex> lock(queueMutex);
+
+                        condition.wait(lock, [this]() {
+                            return stopping || !tasks.empty();
+                        });
+
+                        if (stopping && tasks.empty()) {
+                            return;
+                        }
+
+                        task = std::move(tasks.front());
+                        tasks.pop();
+                    }
+
+                    task();
+                }
+            });
+        }
+    }
+
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
+
+    template <typename Function>
+    std::future<void> submit(Function&& function) {
+        auto packaged = std::make_shared<std::packaged_task<void()>>(
+            std::forward<Function>(function)
+        );
+
+        std::future<void> result = packaged->get_future();
+
+        {
+            std::lock_guard<std::mutex> lock(queueMutex);
+
+            if (stopping) {
+                throw std::runtime_error(
+                    "Cannot submit to a stopped thread pool"
+                );
+            }
+
+            tasks.emplace([packaged]() {
+                (*packaged)();
+            });
+        }
+
+        condition.notify_one();
+        return result;
+    }
+
+    ~ThreadPool() {
+        {
+            std::lock_guard<std::mutex> lock(queueMutex);
+            stopping = true;
+        }
+
+        condition.notify_all();
+
+        for (std::thread& worker : workers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+    }
 };
 
 // ------------------------------------------------------------
@@ -95,11 +195,6 @@ struct Grid {
         return cells[static_cast<size_t>(r) * N + c];
     }
 };
-
-// ThreadPool is defined in main.cpp.
-// We only need its forward declaration here.
-class ThreadPool;
-
 // ------------------------------------------------------------
 // SHARED SIMULATION FUNCTIONS
 // ------------------------------------------------------------

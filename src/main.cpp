@@ -21,114 +21,6 @@
 #include "simulation.h"
 
 using namespace std;
-
-
-// ============================================================
-// THREAD POOL
-// ============================================================
-
-class ThreadPool {
-
-private:
-
-    vector<thread> workers;
-    queue<function<void()>> tasks;
-
-    mutex queueMutex;
-    condition_variable condition;
-
-    bool stopping = false;
-
-public:
-
-    explicit ThreadPool(int threadCount) {
-
-        if (threadCount <= 0) {
-            throw runtime_error("Thread pool size must be positive");
-        }
-
-        workers.reserve(static_cast<size_t>(threadCount));
-
-        for (int i = 0; i < threadCount; i++) {
-
-            workers.emplace_back([this]() {
-
-                while (true) {
-
-                    function<void()> task;
-
-                    {
-                        unique_lock<mutex> lock(queueMutex);
-
-                        condition.wait(lock, [this]() {
-                            return stopping || !tasks.empty();
-                        });
-
-                        if (stopping && tasks.empty()) {
-                            return;
-                        }
-
-                        task = move(tasks.front());
-                        tasks.pop();
-                    }
-
-                    task();
-                }
-            });
-        }
-    }
-
-    ThreadPool(const ThreadPool&) = delete;
-
-    ThreadPool& operator=(const ThreadPool&) = delete;
-
-    template <typename Function>
-    future<void> submit(Function&& function) {
-
-        auto packaged = make_shared<packaged_task<void()>>(
-            forward<Function>(function)
-        );
-
-        future<void> result = packaged->get_future();
-
-        {
-            lock_guard<mutex> lock(queueMutex);
-
-            if (stopping) {
-                throw runtime_error(
-                    "Cannot submit to a stopped thread pool"
-                );
-            }
-
-            tasks.emplace([packaged]() {
-                (*packaged)();
-            });
-        }
-
-        condition.notify_one();
-
-        return result;
-    }
-
-    ~ThreadPool() {
-
-        {
-            lock_guard<mutex> lock(queueMutex);
-            stopping = true;
-        }
-
-        condition.notify_all();
-
-        for (thread& worker : workers) {
-
-            if (worker.joinable()) {
-                worker.join();
-            }
-        }
-    }
-};
-
-
 // ============================================================
 // DETERMINISTIC RANDOM NUMBER GENERATION
 // ============================================================
@@ -903,9 +795,15 @@ void parseArguments(
                 << "--max-pending <maximum-pending-writes>\n"
                 << "--io-latency <milliseconds>\n"
                 << "--snapshot-mode <blocking|async>\n"
-                << "--output <csv-file>\n";
+                << "--output <csv-file>\n"
+                << "--benchmark\n"
+                << "--benchmark-output <csv-file>\n";
 
             exit(0);
+        }
+        if (arg == "--benchmark") {
+            cfg.benchmarkMode = true;
+            continue;
         }
 
         if (i + 1 >= argc) {
@@ -979,6 +877,8 @@ void parseArguments(
 
         else if (arg == "--output")
             cfg.output = value;
+        else if (arg == "--benchmark-output")
+            cfg.benchmarkOutput = value;
 
         else {
 
@@ -1092,6 +992,150 @@ void validateConfig(const Config& cfg) {
     }
 }
 
+// ============================================================
+// PART D: PERFORMANCE BENCHMARK
+// ============================================================
+
+int runBenchmark(const Config& cfg) {
+
+    // Initialization is excluded from benchmark timing.
+    Grid current(cfg.N);
+    Grid next(cfg.N);
+
+    initialize(current, cfg);
+
+    // Create thread pool before starting the timer.
+    unique_ptr<ThreadPool> pool;
+
+    if (cfg.mode == "thread-pool") {
+        pool = make_unique<ThreadPool>(cfg.threads);
+    }
+
+    bool lockdown = false;
+
+    double betaEff = cfg.infectionRate * cfg.mask;
+
+    Counts counts = countStates(current);
+
+    double infectedFraction =
+        static_cast<double>(counts.infected) /
+        current.cells.size();
+
+    if (infectedFraction > cfg.thetaOn) {
+        lockdown = true;
+    }
+
+    int executedDays = 0;
+
+    // Start timing only the simulation loop.
+    auto start = chrono::steady_clock::now();
+
+    for (int day = 1; day <= cfg.days; day++) {
+
+        betaEff = cfg.infectionRate * cfg.mask;
+
+        if (lockdown) {
+            betaEff *= cfg.lockdownFactor;
+        }
+
+        simulateDay(
+            current,
+            next,
+            cfg,
+            day,
+            betaEff,
+            pool.get()
+        );
+
+        swap(current, next);
+
+        counts = countStates(current);
+
+        executedDays = day;
+
+        infectedFraction =
+            static_cast<double>(counts.infected) /
+            current.cells.size();
+
+        if (!lockdown && infectedFraction > cfg.thetaOn) {
+            lockdown = true;
+        }
+        else if (lockdown && infectedFraction < cfg.thetaOff) {
+            lockdown = false;
+        }
+
+        if (counts.infected == 0) {
+            break;
+        }
+    }
+
+    auto stop = chrono::steady_clock::now();
+
+    double elapsedSeconds =
+        chrono::duration<double>(stop - start).count();
+
+    // Checksum calculation is excluded from timing.
+    uint64_t checksum = calculateChecksum(current);
+
+    // Create output directory if necessary.
+    filesystem::path outputPath(cfg.benchmarkOutput);
+
+    if (outputPath.has_parent_path()) {
+        filesystem::create_directories(
+            outputPath.parent_path()
+        );
+    }
+
+    bool writeHeader =
+        !filesystem::exists(outputPath) ||
+        filesystem::file_size(outputPath) == 0;
+
+    ofstream output(
+        cfg.benchmarkOutput,
+        ios::app
+    );
+
+    if (!output.is_open()) {
+        throw runtime_error(
+            "Cannot open benchmark output: " +
+            cfg.benchmarkOutput
+        );
+    }
+
+    if (writeHeader) {
+        output
+            << "N,requested_days,executed_days,seed,"
+            << "threads,chunks,mode,partition,"
+            << "elapsed_seconds,checksum\n";
+    }
+
+    output << setprecision(12)
+           << cfg.N << ","
+           << cfg.days << ","
+           << executedDays << ","
+           << cfg.seed << ","
+           << cfg.threads << ","
+           << cfg.chunks << ","
+           << cfg.mode << ","
+           << cfg.partition << ","
+           << elapsedSeconds << ","
+           << checksum << "\n";
+
+    output.close();
+
+    cout << "\nBenchmark completed!\n";
+    cout << "Grid size: " << cfg.N << " x " << cfg.N << "\n";
+    cout << "Executed days: " << executedDays << "\n";
+    cout << "Threads: " << cfg.threads << "\n";
+    cout << "Elapsed time: "
+         << elapsedSeconds << " seconds\n";
+    cout << "Checksum: " << checksum << "\n";
+    cout << "Benchmark saved in: "
+         << cfg.benchmarkOutput << "\n";
+
+    return 0;
+}
+
 
 // ============================================================
 // MAIN
@@ -1110,6 +1154,14 @@ int main(int argc, char* argv[]) {
 
         validateConfig(cfg);
 
+        if (cfg.benchmarkMode) {
+
+            if (cfg.snapshotEvery != 0) {
+                throw runtime_error("Snapshots must be disabled in benchmark mode");
+            }
+
+            return runBenchmark(cfg);
+        }
 
         // Create current and next grids
 

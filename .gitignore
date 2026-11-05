@@ -9,3 +9,19 @@ __pycache__/
 *.pyc
 .vscode/
 results/snapshots/
+# Release build
+/build-release/
+
+# Benchmark execution logs
+/results/benchmarks/*.log
+
+# Individual simulation output files
+/results/benchmarks/d4_R*_T*_rep*.csv
+/results/benchmarks/d5_async_*.csv
+/results/benchmarks/d5_blocking_*.csv
+/results/benchmarks/d5_none_*.csv
+/results/benchmarks/d5_test.csv
+/results/benchmarks/d5x_*.csv
+
+# Local backup script
+/scripts/run_d5_original.sh
