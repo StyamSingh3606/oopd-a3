@@ -240,9 +240,3 @@ To inspect recent commits:
 ```bash
 git log --oneline --decorate -5
 ```
-
-## 11. Author
-
-**Student:** Satyam Singh  
-**Course:** CSE600  
-**Assignment:** Assignment 3 – Parallel and Asynchronous Simulation of Pandemic Spread
