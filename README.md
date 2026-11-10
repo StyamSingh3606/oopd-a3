@@ -1,9 +1,5 @@
 # Parallel and Asynchronous Simulation of Pandemic Spread
 
-**Course:** CSE600  
-**Assignment:** Assignment 3  
-**Language:** C++17
-
 ## 1. Project Overview
 
 This project implements a pandemic spread simulation on a two-dimensional population grid. It explores sequential execution, multithreading, asynchronous programming, and performance optimization.
