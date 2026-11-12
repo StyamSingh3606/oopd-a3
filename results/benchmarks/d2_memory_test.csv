@@ -1,2 +1,0 @@
-N,requested_days,executed_days,seed,threads,chunks,mode,partition,elapsed_seconds,checksum
-2828,200,200,42,8,32,thread-pool,block,15.999579655,5069678774552007533
